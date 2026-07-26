@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-inter);
+  --font-serif: var(--font-cinzel);
+  --color-background: #0c0a09;
+  --color-foreground: #f5f0e8;
+  --color-primary: #c9a84c;
+  --color-muted: #4a3f2f;
+  --color-surface: #1c1814;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+canvas {
+  display: block;
+}
