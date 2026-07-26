@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useRef, useState, useCallback, useMemo } from "react";
+import { Suspense, useRef, useState, useCallback } from "react";
 import { Canvas } from "@react-three/fiber";
 import { CameraControls, Environment } from "@react-three/drei";
 import * as THREE from "three";
@@ -108,7 +108,7 @@ export default function Scene() {
   return (
     <div className="w-full h-full relative">
       <Canvas
-        shadows
+        shadows={{ type: THREE.PCFShadowMap }}
         camera={{
           fov: 45,
           near: 0.5,

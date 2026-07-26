@@ -136,8 +136,6 @@ TREE_MODELS.forEach((url) => useGLTF.preload(url));
 ROCK_MODELS.forEach((url) => useGLTF.preload(url));
 
 export default function Nature({ hmap }: { hmap: Float32Array }) {
-  const rng = seededRng(42);
-
   const treePoints = useMemo(
     () => poissonScatter(120, 4.5, 7, hmap, 1.5, 18, 0.55, 14),
     [hmap]
