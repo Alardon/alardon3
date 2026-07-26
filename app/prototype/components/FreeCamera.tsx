@@ -2,9 +2,14 @@
 
 /**
  * FreeCamera.tsx
- * WASD/QE movement + mouse-look (hold RMB or click-to-lock pointer).
- * Scroll wheel adjusts speed. Shift = sprint. Space/C = up/down.
- * Terrain-follows: camera stays at least MIN_HEIGHT above ground.
+ * WASD movement + mouse-look.
+ *
+ * Mouse control modes:
+ *   1. Click anywhere on canvas  → requestPointerLock → mouselook until Esc
+ *   2. Hold RMB anywhere         → mouselook while held (fallback / no pointer lock needed)
+ *
+ * Scroll wheel adjusts movement speed.
+ * Shift = sprint (×4).  Ctrl = slow (÷4).  Space/C/Q/E = altitude.
  */
 
 import { useEffect, useRef } from "react";
@@ -12,59 +17,35 @@ import { useThree, useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { worldHeight } from "./WorldNoise";
 
-const BASE_SPEED   = 18;   // m/s
-const SPRINT_MULT  = 4.0;
-const SLOW_MULT    = 0.25;
-const SENSITIVITY  = 0.0022;  // rad per pixel
-const SMOOTHING    = 8.0;     // lerp factor per second
-const MIN_HEIGHT   = 3.0;     // metres above terrain
+const BASE_SPEED  = 20;    // m/s
+const SPRINT_MULT = 4.0;
+const SLOW_MULT   = 0.25;
+const SENSITIVITY = 0.0020; // rad / px
+const SMOOTHING   = 10;     // lerp factor per second
+const MIN_HEIGHT  = 2.5;    // metres above terrain
 
 export default function FreeCamera() {
   const { camera, gl } = useThree();
 
-  // Key state
-  const keys = useRef<Record<string, boolean>>({});
-  // Mouse delta accumulated per frame
-  const mouseDelta = useRef({ x: 0, y: 0 });
-  // Pointer lock state
+  const keys       = useRef<Record<string, boolean>>({});
+  const deltaX     = useRef(0);
+  const deltaY     = useRef(0);
   const locked     = useRef(false);
-  // RMB held (no pointer-lock needed for pan)
   const rmbHeld    = useRef(false);
-  // Speed multiplier (scroll wheel)
   const speedMult  = useRef(1.0);
-  // Smooth velocity
   const velocity   = useRef(new THREE.Vector3());
-  // Euler (yaw, pitch)
   const euler      = useRef(new THREE.Euler(0, 0, 0, "YXZ"));
 
   useEffect(() => {
     const canvas = gl.domElement;
 
-    const onKey = (e: KeyboardEvent) => {
-      keys.current[e.code] = e.type === "keydown";
-    };
+    // ── Init euler from camera's current orientation ──────────────────────
+    euler.current.setFromQuaternion(camera.quaternion, "YXZ");
 
-    const onMouseMove = (e: MouseEvent) => {
-      if (locked.current) {
-        mouseDelta.current.x += e.movementX;
-        mouseDelta.current.y += e.movementY;
-      } else if (rmbHeld.current) {
-        mouseDelta.current.x += e.movementX;
-        mouseDelta.current.y += e.movementY;
-      }
-    };
-
-    const onMouseDown = (e: MouseEvent) => {
-      if (e.button === 2) {
-        rmbHeld.current = true;
-        // Try pointer lock for smoother control
-        canvas.requestPointerLock?.().catch(() => {});
-      }
-    };
-    const onMouseUp = (e: MouseEvent) => {
-      if (e.button === 2) {
-        rmbHeld.current = false;
-        if (!locked.current) document.exitPointerLock?.();
+    // ── Pointer Lock helpers ───────────────────────────────────────────────
+    const requestLock = () => {
+      if (!document.pointerLockElement) {
+        canvas.requestPointerLock();
       }
     };
 
@@ -72,90 +53,132 @@ export default function FreeCamera() {
       locked.current = document.pointerLockElement === canvas;
     };
 
+    const onLockError = () => {
+      locked.current = false;
+    };
+
+    // ── Left-click to lock ─────────────────────────────────────────────────
+    const onCanvasClick = () => requestLock();
+
+    // ── RMB hold ──────────────────────────────────────────────────────────
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button === 2) {
+        rmbHeld.current = true;
+        requestLock();
+      }
+    };
+    const onMouseUp = (e: MouseEvent) => {
+      if (e.button === 2) rmbHeld.current = false;
+    };
+
+    // ── Mouse move — must listen on document for pointer lock ──────────────
+    const onMouseMove = (e: MouseEvent) => {
+      if (locked.current || rmbHeld.current) {
+        deltaX.current += e.movementX;
+        deltaY.current += e.movementY;
+      }
+    };
+
+    // ── Keys ──────────────────────────────────────────────────────────────
+    const onKeyDown = (e: KeyboardEvent) => {
+      keys.current[e.code] = true;
+      // Esc releases pointer lock (browser does this automatically, but track it)
+      if (e.code === "Escape") locked.current = false;
+    };
+    const onKeyUp = (e: KeyboardEvent) => { keys.current[e.code] = false; };
+
+    // ── Scroll speed ──────────────────────────────────────────────────────
     const onWheel = (e: WheelEvent) => {
-      speedMult.current = Math.max(0.2, Math.min(8.0,
-        speedMult.current * (e.deltaY > 0 ? 0.9 : 1.11)
+      speedMult.current = Math.max(0.1, Math.min(10,
+        speedMult.current * (e.deltaY > 0 ? 0.88 : 1.14),
       ));
     };
 
     const onContextMenu = (e: Event) => e.preventDefault();
 
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("keyup",   onKey);
-    window.addEventListener("mousemove", onMouseMove);
+    // register
+    canvas.addEventListener("click",       onCanvasClick);
     canvas.addEventListener("mousedown",   onMouseDown);
     window.addEventListener("mouseup",     onMouseUp);
-    document.addEventListener("pointerlockchange", onLockChange);
+    document.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("keydown",     onKeyDown);
+    window.addEventListener("keyup",       onKeyUp);
     canvas.addEventListener("wheel",       onWheel, { passive: true });
     canvas.addEventListener("contextmenu", onContextMenu);
-
-    // Set initial camera orientation
-    euler.current.setFromQuaternion(camera.quaternion, "YXZ");
+    document.addEventListener("pointerlockchange", onLockChange);
+    document.addEventListener("pointerlockerror",  onLockError);
 
     return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("keyup",   onKey);
-      window.removeEventListener("mousemove", onMouseMove);
+      canvas.removeEventListener("click",       onCanvasClick);
       canvas.removeEventListener("mousedown",   onMouseDown);
       window.removeEventListener("mouseup",     onMouseUp);
-      document.removeEventListener("pointerlockchange", onLockChange);
+      document.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("keydown",     onKeyDown);
+      window.removeEventListener("keyup",       onKeyUp);
       canvas.removeEventListener("wheel",       onWheel);
       canvas.removeEventListener("contextmenu", onContextMenu);
+      document.removeEventListener("pointerlockchange", onLockChange);
+      document.removeEventListener("pointerlockerror",  onLockError);
     };
   }, [camera, gl]);
 
-  const tmpVec = useRef(new THREE.Vector3());
-  const fwdVec = useRef(new THREE.Vector3());
-  const rgtVec = useRef(new THREE.Vector3());
-  const upVec  = useRef(new THREE.Vector3(0, 1, 0));
-  const targetVel = useRef(new THREE.Vector3());
+  // Reusable vectors (allocated once)
+  const tmp      = useRef(new THREE.Vector3());
+  const fwd      = useRef(new THREE.Vector3());
+  const rgt      = useRef(new THREE.Vector3());
+  const up       = useRef(new THREE.Vector3(0, 1, 0));
+  const targetV  = useRef(new THREE.Vector3());
 
   useFrame((_, dt) => {
     const k = keys.current;
-    const speed = BASE_SPEED * speedMult.current
-      * (k["ShiftLeft"] || k["ShiftRight"] ? SPRINT_MULT : 1)
-      * (k["ControlLeft"] ? SLOW_MULT : 1);
 
     // ── Mouse look ─────────────────────────────────────────────────────────
-    if (mouseDelta.current.x !== 0 || mouseDelta.current.y !== 0) {
-      euler.current.y -= mouseDelta.current.x * SENSITIVITY;
-      euler.current.x -= mouseDelta.current.y * SENSITIVITY;
-      euler.current.x  = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, euler.current.x));
+    if (deltaX.current !== 0 || deltaY.current !== 0) {
+      euler.current.y -= deltaX.current * SENSITIVITY;
+      euler.current.x  = Math.max(
+        -Math.PI / 2 + 0.01,
+        Math.min(Math.PI / 2 - 0.01, euler.current.x - deltaY.current * SENSITIVITY),
+      );
       camera.quaternion.setFromEuler(euler.current);
-      mouseDelta.current.x = 0;
-      mouseDelta.current.y = 0;
+      deltaX.current = 0;
+      deltaY.current = 0;
     }
 
-    // ── Compute movement axes ───────────────────────────────────────────────
-    // Forward = camera direction projected to XZ
-    camera.getWorldDirection(fwdVec.current);
-    fwdVec.current.y = 0;
-    fwdVec.current.normalize();
-    rgtVec.current.crossVectors(fwdVec.current, upVec.current).negate().normalize();
+    // ── Speed ──────────────────────────────────────────────────────────────
+    const sprint = k["ShiftLeft"] || k["ShiftRight"];
+    const slow   = k["ControlLeft"] || k["ControlRight"];
+    const speed  = BASE_SPEED * speedMult.current
+      * (sprint ? SPRINT_MULT : 1)
+      * (slow   ? SLOW_MULT   : 1);
 
-    targetVel.current.set(0, 0, 0);
+    // ── Movement axes ──────────────────────────────────────────────────────
+    camera.getWorldDirection(fwd.current);
+    fwd.current.y = 0;
+    fwd.current.normalize();
+    rgt.current.crossVectors(fwd.current, up.current).negate().normalize();
 
-    if (k["KeyW"] || k["ArrowUp"])    targetVel.current.addScaledVector(fwdVec.current,  speed);
-    if (k["KeyS"] || k["ArrowDown"])  targetVel.current.addScaledVector(fwdVec.current, -speed);
-    if (k["KeyA"] || k["ArrowLeft"])  targetVel.current.addScaledVector(rgtVec.current,  speed);
-    if (k["KeyD"] || k["ArrowRight"]) targetVel.current.addScaledVector(rgtVec.current, -speed);
-    if (k["Space"])                   targetVel.current.y += speed;
-    if (k["KeyC"] || k["KeyQ"])       targetVel.current.y -= speed;
-    // E = up (alternative)
-    if (k["KeyE"])                    targetVel.current.y += speed;
+    targetV.current.set(0, 0, 0);
+    if (k["KeyW"] || k["ArrowUp"])    targetV.current.addScaledVector(fwd.current,  speed);
+    if (k["KeyS"] || k["ArrowDown"])  targetV.current.addScaledVector(fwd.current, -speed);
+    if (k["KeyA"] || k["ArrowLeft"])  targetV.current.addScaledVector(rgt.current,  speed);
+    if (k["KeyD"] || k["ArrowRight"]) targetV.current.addScaledVector(rgt.current, -speed);
+    if (k["Space"])                   targetV.current.y += speed;
+    if (k["KeyC"] || k["KeyQ"])       targetV.current.y -= speed;
+    if (k["KeyE"])                    targetV.current.y += speed;
 
-    // Smooth velocity
-    const alpha = Math.min(1, SMOOTHING * dt);
-    velocity.current.lerp(targetVel.current, alpha);
+    // ── Smooth velocity ────────────────────────────────────────────────────
+    velocity.current.lerp(targetV.current, Math.min(1, SMOOTHING * dt));
 
-    // Apply movement
-    tmpVec.current.copy(velocity.current).multiplyScalar(dt);
-    camera.position.add(tmpVec.current);
+    // ── Apply ──────────────────────────────────────────────────────────────
+    tmp.current.copy(velocity.current).multiplyScalar(dt);
+    camera.position.add(tmp.current);
 
-    // ── Terrain floor clamp ─────────────────────────────────────────────────
-    const terrainY = worldHeight(camera.position.x, camera.position.z);
-    const minY     = terrainY + MIN_HEIGHT;
-    if (camera.position.y < minY) camera.position.y = minY;
+    // ── Terrain floor clamp ────────────────────────────────────────────────
+    const ground = worldHeight(camera.position.x, camera.position.z);
+    if (camera.position.y < ground + MIN_HEIGHT) {
+      camera.position.y = ground + MIN_HEIGHT;
+      if (velocity.current.y < 0) velocity.current.y = 0;
+    }
   });
 
   return null;

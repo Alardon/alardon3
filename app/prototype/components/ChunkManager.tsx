@@ -15,8 +15,8 @@ import TerrainChunk from "./TerrainChunk";
 import NatureChunk from "./NatureChunk";
 
 // Tune these for performance vs. view distance:
-const LOAD_RADIUS   = 2;   // chunks — (2*2+1)²=25 max active
-const UNLOAD_RADIUS = 3;
+const LOAD_RADIUS   = 10;  // chunks — circular, ~314 max active
+const UNLOAD_RADIUS = 12;
 
 type ChunkKey = `${number},${number}`;
 function key(cx: number, cz: number): ChunkKey { return `${cx},${cz}`; }
@@ -40,15 +40,18 @@ interface ChunkManagerProps {
 
 export default function ChunkManager({ onChunkLoaded }: ChunkManagerProps) {
   const [chunks, setChunks] = useState<ChunkState[]>(() => {
-    // Bootstrap with a 3×3 grid around origin so the player spawns into terrain
+    // Bootstrap with chunks around origin up to radius 3
     const init: ChunkState[] = [];
-    for (let cz = -1; cz <= 1; cz++)
-      for (let cx = -1; cx <= 1; cx++)
-        init.push({ cx, cz, key: key(cx, cz) });
+    const R = 3;
+    for (let cz = -R; cz <= R; cz++)
+      for (let cx = -R; cx <= R; cx++)
+        if (cx * cx + cz * cz <= R * R)
+          init.push({ cx, cz, key: key(cx, cz) });
     return init;
   });
 
-  const loadedKeys  = useRef<Set<ChunkKey>>(new Set(chunks.map((c) => c.key)));
+  // Use initializer fn to capture the same bootstrap set
+  const loadedKeys = useRef<Set<ChunkKey>>(new Set(chunks.map((c) => c.key)));
   const lastCamChunk = useRef<ChunkKey>("999,999"); // force first update
   const hmaps        = useRef<HmapStore>({});
 

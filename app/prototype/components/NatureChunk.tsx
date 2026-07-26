@@ -41,8 +41,8 @@ const ROCK_URLS = [
 
 [...PINE_URLS, ...OAK_URLS, ...ROCK_URLS].forEach((u) => useGLTF.preload(u));
 
-// ── Scale — 30× so trees match castle-wall height ─────────────────────────────
-const TREE_SCALE = 30;
+// ── Scale — 3× so trees are reasonable size relative to castle walls ──────────
+const TREE_SCALE = 3;
 
 // ── Seeded LCG ────────────────────────────────────────────────────────────────
 function lcg(seed: number) {

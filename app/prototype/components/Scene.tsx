@@ -106,8 +106,8 @@ export default function Scene() {
           <ChunkManager onChunkLoaded={handleChunkLoaded} />
           <WorldObjects />
 
-          {/* Scene-level fog matching shader fog */}
-          <fog attach="fog" args={["#adc4d8", 180, 600]} />
+          {/* Exponential fog — hides distant chunk edges smoothly */}
+          <fogExp2 attach="fog" args={["#b8cedc", 0.008]} />
         </Suspense>
       </Canvas>
 
