@@ -1,193 +1,139 @@
 "use client";
 
-import { Suspense, useRef, useState, useCallback } from "react";
+import { Suspense, useRef, useCallback } from "react";
 import { Canvas } from "@react-three/fiber";
-import { CameraControls, Sky } from "@react-three/drei";
+import { Sky } from "@react-three/drei";
 import * as THREE from "three";
-import Terrain from "./Terrain";
-import Nature from "./Nature";
+import ChunkManager from "./ChunkManager";
+import FreeCamera from "./FreeCamera";
 import Settlement from "./Settlement";
-import Units from "./SpriteBillboard";
 
-const MIN_POLAR   = THREE.MathUtils.degToRad(28);
-const MAX_POLAR   = THREE.MathUtils.degToRad(65);
-const MIN_DISTANCE = 16;
-const MAX_DISTANCE = 110;
+// ── Sun direction ─────────────────────────────────────────────────────────────
+const SUN = new THREE.Vector3(0.55, 0.85, 0.35).normalize();
 
-// ── RTS camera ────────────────────────────────────────────────────────────────
-function RTSCamera() {
-  const ref = useRef<CameraControls>(null!);
-  return (
-    <CameraControls
-      ref={ref}
-      minPolarAngle={MIN_POLAR}
-      maxPolarAngle={MAX_POLAR}
-      minDistance={MIN_DISTANCE}
-      maxDistance={MAX_DISTANCE}
-      dollySpeed={0.9}
-      truckSpeed={2.8}
-      smoothTime={0.22}
-      draggingSmoothTime={0.08}
-    />
-  );
-}
-
-// ── Lighting — golden-hour sun + atmosphere ───────────────────────────────────
-// Sun position: azimuth from the south-east, elevation ~25° (long shadows)
-const SUN_POSITION = new THREE.Vector3(80, 55, 45).normalize();
-
+// ── Lighting ──────────────────────────────────────────────────────────────────
 function Lighting() {
   return (
     <>
-      {/* Primary sun — warm golden light, sharp long shadows */}
+      {/* Primary sun — warm golden, long cascaded shadows */}
       <directionalLight
-        position={[80, 55, 45]}
-        intensity={3.2}
-        color="#ffe8b0"
+        position={[110, 140, 70]}
+        intensity={3.8}
+        color="#ffe0a0"
         castShadow
         shadow-mapSize-width={4096}
         shadow-mapSize-height={4096}
         shadow-camera-near={1}
-        shadow-camera-far={320}
-        shadow-camera-left={-130}
-        shadow-camera-right={130}
-        shadow-camera-top={130}
-        shadow-camera-bottom={-130}
-        shadow-radius={2.5}
-        shadow-bias={-0.0004}
-        shadow-normalBias={0.02}
+        shadow-camera-far={600}
+        shadow-camera-left={-220}
+        shadow-camera-right={220}
+        shadow-camera-top={220}
+        shadow-camera-bottom={-220}
+        shadow-radius={3}
+        shadow-bias={-0.0003}
+        shadow-normalBias={0.025}
       />
-
-      {/* Sky hemisphere — cool blue sky / warm brown earth */}
-      <hemisphereLight
-        args={["#aac8f8", "#5a3d22", 1.1]}
-      />
-
-      {/* Soft fill from opposite side (blue-sky bounce) */}
-      <directionalLight
-        position={[-50, 30, -25]}
-        intensity={0.55}
-        color="#90b8e8"
-      />
-
-      {/* Subtle ground bounce (warm) */}
-      <directionalLight
-        position={[0, -10, 0]}
-        intensity={0.18}
-        color="#c8a870"
-      />
+      {/* Sky hemisphere */}
+      <hemisphereLight args={["#a8c8f8", "#503820", 1.4]} />
+      {/* Cool blue fill (sky bounce) */}
+      <directionalLight position={[-80, 40, -40]} intensity={0.65} color="#80aae0" />
+      {/* Warm ground bounce */}
+      <directionalLight position={[0, -8, 0]} intensity={0.22} color="#c8a060" />
     </>
   );
 }
 
-// ── World content ─────────────────────────────────────────────────────────────
-function WorldContent({ onHeightmapReady }: { onHeightmapReady: (h: Float32Array) => void }) {
-  const [hmap, setHmap] = useState<Float32Array | null>(null);
-
-  const handleHeightmap = useCallback(
-    (h: Float32Array) => { setHmap(h); onHeightmapReady(h); },
-    [onHeightmapReady]
-  );
-
-  return (
-    <>
-      <Terrain onHeightmapReady={handleHeightmap} />
-      {hmap && (
-        <>
-          <Nature hmap={hmap} />
-          <Settlement hmap={hmap} />
-          <Units hmap={hmap} />
-        </>
-      )}
-    </>
-  );
+// ── Static scene objects (castle) ─────────────────────────────────────────────
+function WorldObjects() {
+  // Settlement needs hmap — pass null initially; it will snap once terrain loads
+  // For chunk system, Settlement at (0, 0) chunk uses worldHeight directly
+  return <Settlement hmap={null} />;
 }
 
-function LoadingFallback() {
+// ── Loading fallback ───────────────────────────────────────────────────────────
+function LoadingBox() {
   return (
-    <mesh>
-      <boxGeometry args={[1, 1, 1]} />
+    <mesh position={[0, 2, 0]}>
+      <boxGeometry args={[2, 2, 2]} />
       <meshBasicMaterial color="#4a3820" />
     </mesh>
   );
 }
 
-// ── Scene root ────────────────────────────────────────────────────────────────
+// ── Main Scene ─────────────────────────────────────────────────────────────────
 export default function Scene() {
-  const [hmapReady, setHmapReady] = useState(false);
-  const onHmapReady = useCallback(() => setHmapReady(true), []);
+  const canvasRef = useRef<HTMLDivElement>(null);
+
+  const handleChunkLoaded = useCallback(
+    (_cx: number, _cz: number, _hmap: Float32Array) => {
+      // Could be used to notify Settlement etc. in the future
+    },
+    []
+  );
 
   return (
-    <div className="w-full h-full relative">
+    <div ref={canvasRef} className="w-full h-full relative" tabIndex={0}>
       <Canvas
         shadows={{ type: THREE.PCFShadowMap }}
         camera={{
-          fov: 42,
-          near: 0.4,
-          far: 1200,
-          position: [0, 50, 80],
+          fov: 70,
+          near: 0.5,
+          far: 900,
+          position: [32, 22, 50],  // start looking over the settlement
         }}
         gl={{
           toneMapping: THREE.ACESFilmicToneMapping,
-          toneMappingExposure: 1.05,
+          toneMappingExposure: 1.08,
           antialias: true,
           powerPreference: "high-performance",
         }}
         className="w-full h-full"
       >
-        <Suspense fallback={<LoadingFallback />}>
-          {/* Procedural sky + sun disc */}
+        <Suspense fallback={<LoadingBox />}>
           <Sky
-            distance={6000}
-            sunPosition={SUN_POSITION}
-            inclination={0.36}
-            azimuth={0.22}
-            turbidity={7}
-            rayleigh={1.8}
-            mieCoefficient={0.004}
-            mieDirectionalG={0.82}
+            distance={8000}
+            sunPosition={SUN}
+            inclination={0.35}
+            azimuth={0.24}
+            turbidity={6}
+            rayleigh={1.6}
+            mieCoefficient={0.003}
+            mieDirectionalG={0.84}
           />
 
           <Lighting />
-          <RTSCamera />
-          <WorldContent onHeightmapReady={onHmapReady} />
+          <FreeCamera />
+          <ChunkManager onChunkLoaded={handleChunkLoaded} />
+          <WorldObjects />
 
-          {/* Atmospheric fog */}
-          <fog attach="fog" args={["#b8cce0", 120, 280]} />
+          {/* Scene-level fog matching shader fog */}
+          <fog attach="fog" args={["#adc4d8", 180, 600]} />
         </Suspense>
       </Canvas>
 
-      {/* HUD */}
-      <div className="absolute top-4 left-4 pointer-events-none">
-        <div className="bg-black/50 border border-yellow-700/50 rounded px-3 py-2">
+      {/* HUD overlay */}
+      <div className="absolute top-4 left-4 pointer-events-none select-none">
+        <div className="bg-black/55 border border-yellow-700/40 rounded px-3 py-2">
           <h1 className="font-serif text-yellow-300 text-lg tracking-widest uppercase">Alardon</h1>
           <p className="font-sans text-stone-300 text-xs mt-0.5 tracking-wide">World Prototype</p>
         </div>
       </div>
 
       {/* Controls hint */}
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 pointer-events-none">
-        <div className="bg-black/50 border border-stone-700/50 rounded px-4 py-2 text-center">
-          <p className="font-sans text-stone-400 text-xs tracking-wide">
-            Drag to rotate &nbsp;·&nbsp; Scroll to zoom &nbsp;·&nbsp; Right-drag to pan
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 pointer-events-none select-none">
+        <div className="bg-black/55 border border-stone-700/40 rounded px-4 py-2 text-center space-y-0.5">
+          <p className="font-sans text-stone-300 text-xs tracking-wide">
+            <span className="text-yellow-400">WASD</span> — move &nbsp;
+            <span className="text-yellow-400">RMB drag</span> — look &nbsp;
+            <span className="text-yellow-400">Space / C</span> — up / down
           </p>
-          <p className="font-sans text-yellow-500/80 text-xs mt-0.5">
-            Click the north wall segment to break it
+          <p className="font-sans text-stone-400 text-xs tracking-wide">
+            <span className="text-yellow-400/80">Shift</span> sprint &nbsp;·&nbsp;
+            <span className="text-yellow-400/80">Scroll</span> speed &nbsp;·&nbsp;
+            <span className="text-yellow-400/80">Ctrl</span> slow
           </p>
         </div>
       </div>
-
-      {/* Loading screen */}
-      {!hmapReady && (
-        <div className="absolute inset-0 flex items-center justify-center bg-stone-950/80 pointer-events-none">
-          <div className="text-center">
-            <div className="w-8 h-8 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-            <p className="font-serif text-yellow-300 text-sm tracking-widest uppercase">
-              Generating World...
-            </p>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
