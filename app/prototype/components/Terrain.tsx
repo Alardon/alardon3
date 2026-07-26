@@ -6,33 +6,60 @@ import * as THREE from "three";
 import { createNoise2D } from "simplex-noise";
 import { useFrame } from "@react-three/fiber";
 
-const GRID = 200;
-const SIZE = 200;
-const MAX_HEIGHT = 28;
-const SEA_LEVEL = 0;
+export const GRID = 200;
+export const SIZE = 200;
+export const MAX_HEIGHT = 32;
+export const SEA_LEVEL = -2;
 
-// fBm — fractional Brownian motion
+// ─────────────────────────────────────────────
+// Heightmap: one mountain on the NORTH side (z < -30),
+// everywhere else is a flat-ish plain with gentle rolling.
+// Castle sits at (0,0) on the plain.
+// ─────────────────────────────────────────────
 function buildHeightmap(noise2D: ReturnType<typeof createNoise2D>): Float32Array {
   const verts = (GRID + 1) * (GRID + 1);
   const hmap = new Float32Array(verts);
+
   for (let z = 0; z <= GRID; z++) {
     for (let x = 0; x <= GRID; x++) {
+      const wx = (x / GRID - 0.5) * SIZE; // -100..100
+      const wz = (z / GRID - 0.5) * SIZE; // -100..100
+
       const nx = x / GRID;
       const nz = z / GRID;
-      let v = 0;
-      let amp = 1;
-      let freq = 1.8;
-      let norm = 0;
-      for (let o = 0; o < 7; o++) {
-        v += noise2D(nx * freq, nz * freq) * amp;
-        norm += amp;
-        amp *= 0.48;
-        freq *= 2.1;
+
+      // --- Micro detail noise (applies everywhere) ---
+      let detail = 0;
+      let da = 1, df = 4.5, dn = 0;
+      for (let o = 0; o < 4; o++) {
+        detail += noise2D(nx * df, nz * df) * da;
+        dn += da; da *= 0.45; df *= 2.2;
       }
-      v /= norm;
-      // push terrain up overall so we have peaks
-      v = (v + 0.3) * MAX_HEIGHT;
-      hmap[z * (GRID + 1) + x] = v;
+      detail = (detail / dn) * 1.8; // small bumps ±1.8
+
+      // --- Mountain region: z < -20 (north) ---
+      // mountain mask: smooth ramp from z=-20 to z=-50, full at z<-50
+      const mountainMask = Math.max(0, Math.min(1, (-wz - 20) / 30));
+
+      // mountain fBm
+      let mHeight = 0;
+      let ma = 1, mf = 1.2, mn = 0;
+      for (let o = 0; o < 6; o++) {
+        mHeight += noise2D(nx * mf + 5.3, nz * mf + 2.1) * ma;
+        mn += ma; ma *= 0.52; mf *= 2.0;
+      }
+      mHeight = ((mHeight / mn) * 0.5 + 0.55) * MAX_HEIGHT; // 0..32 range
+
+      // centre the mountain peak around x=0, spread it
+      const mxOff = Math.abs(wx) / 60;
+      const mPeak = Math.max(0, mHeight - mxOff * mxOff * 8);
+
+      // --- Plain region ---
+      const plainH = 1.5 + detail * 0.6; // gently bumpy, ~0..3
+
+      // blend
+      const h = plainH + mountainMask * (mPeak - plainH);
+      hmap[z * (GRID + 1) + x] = Math.max(SEA_LEVEL - 0.5, h);
     }
   }
   return hmap;
@@ -62,20 +89,23 @@ export function getSlopeAt(hmap: Float32Array, wx: number, wz: number): number {
   return Math.sqrt(dx * dx + dz * dz);
 }
 
-// vertex + fragment shader for splat blending
+// ─────────────────────────────────────────────
+// Terrain splat shader — PBR-style with per-vertex
+// diffuse lighting baked in; receives R3F shadows.
+// ─────────────────────────────────────────────
 const vertexShader = /* glsl */ `
-  uniform sampler2D heightMap;
-  varying vec2 vUv;
+  varying vec2  vUv;
   varying float vHeight;
   varying float vSlope;
-  varying vec3 vNormal;
+  varying vec3  vNormal;
+  varying vec3  vWorldPos;
 
   void main() {
-    vUv = uv;
-    vHeight = position.y;
-    // slope from normal
-    vNormal = normalize(normalMatrix * normal);
-    vSlope = 1.0 - abs(dot(vNormal, vec3(0.0, 1.0, 0.0)));
+    vUv       = uv;
+    vHeight   = position.y;
+    vNormal   = normalize(normalMatrix * normal);
+    vSlope    = 1.0 - clamp(dot(vNormal, vec3(0.0, 1.0, 0.0)), 0.0, 1.0);
+    vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
@@ -88,55 +118,78 @@ const fragmentShader = /* glsl */ `
   uniform sampler2D tSnow;
   uniform float maxHeight;
   uniform float seaLevel;
+  uniform vec3  sunDir;
+  uniform vec3  sunColor;
+  uniform vec3  skyColor;
+  uniform vec3  groundColor;
+  uniform float time;
+  uniform float shadowStrength;
 
-  varying vec2 vUv;
+  varying vec2  vUv;
   varying float vHeight;
   varying float vSlope;
-  varying vec3 vNormal;
-
-  // smoothstep blend
-  float sbend(float lo, float hi, float v) {
-    return smoothstep(lo, hi, v);
-  }
+  varying vec3  vNormal;
+  varying vec3  vWorldPos;
 
   void main() {
-    vec2 tiledUV = vUv * 32.0;
+    // ── tiling UVs ───────────────────────────────────────────────────
+    vec2 uv16 = vUv * 16.0;
+    vec2 uv32 = vUv * 32.0;
 
-    vec4 grass = texture2D(tGrass, tiledUV);
-    vec4 dirt  = texture2D(tDirt,  tiledUV);
-    vec4 rock  = texture2D(tRock,  tiledUV);
-    vec4 sand  = texture2D(tSand,  tiledUV);
-    vec4 snow  = texture2D(tSnow,  tiledUV);
+    vec4 cGrass = texture2D(tGrass, uv16);
+    vec4 cDirt  = texture2D(tDirt,  uv32);
+    vec4 cRock  = texture2D(tRock,  uv16);
+    vec4 cSand  = texture2D(tSand,  uv32);
+    vec4 cSnow  = texture2D(tSnow,  uv16);
 
     float h = vHeight;
-    float slope = vSlope;
+    float sl = vSlope;
 
-    // --- height-based blend (low->high)
-    // grass: 0 ~ 8, transitions to dirt 6~10
-    float fGrass = sbend(2.0, 6.0, h) * (1.0 - sbend(6.0, 10.0, h));
-    float fDirt  = sbend(0.0, 4.0, h) * (1.0 - sbend(10.0, 14.0, h));
-    float fRockH = sbend(10.0, 15.0, h);
-    float fSnow  = sbend(18.0, 24.0, h);
+    // ── height / slope splat weights ─────────────────────────────────
+    float wSand  = smoothstep(-1.0, 1.5, h)    * (1.0 - smoothstep(1.5, 3.5, h));
+    float wGrass = smoothstep(1.0, 4.0, h)     * (1.0 - smoothstep(10.0, 16.0, h));
+    float wDirt  = smoothstep(0.5, 3.0, h)     * (1.0 - smoothstep(14.0, 18.0, h));
+    float wRockH = smoothstep(12.0, 18.0, h);
+    float wSnow  = smoothstep(22.0, 28.0, h);
+    float wSlope = smoothstep(0.40, 0.65, sl);  // steep → rock
 
-    // sand at beach level
-    float sandLevel = seaLevel + 1.5;
-    float fSand = sbend(seaLevel - 1.0, sandLevel, h) * (1.0 - sbend(sandLevel, sandLevel + 2.0, h));
+    // normalise
+    float total = wSand + wGrass + wDirt + max(wRockH, wSlope) + wSnow + 0.001;
+    wSand  /= total; wGrass /= total; wDirt /= total;
+    float wR = max(wRockH, wSlope) / total;
+    wSnow  /= total;
 
-    // --- slope override: steep becomes rock regardless of height
-    float slopeMask = sbend(0.45, 0.7, slope);
+    // ── splat colour ──────────────────────────────────────────────────
+    vec4 col = cDirt;
+    col = mix(col, cSand,  wSand);
+    col = mix(col, cGrass, wGrass);
+    col = mix(col, cRock,  wR);
+    col = mix(col, cSnow,  wSnow);
 
-    // --- compose
-    vec4 col = dirt; // base fallback
-    col = mix(col, grass, clamp(fGrass, 0.0, 1.0));
-    col = mix(col, sand,  clamp(fSand  * (1.0 - slopeMask), 0.0, 1.0));
-    col = mix(col, rock,  clamp(fRockH, 0.0, 1.0));
-    col = mix(col, rock,  slopeMask);
-    col = mix(col, snow,  clamp(fSnow * (1.0 - slopeMask * 0.7), 0.0, 1.0));
+    // ── lighting ──────────────────────────────────────────────────────
+    // hemisphere ambient
+    float hemiT = clamp(vNormal.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 ambient = mix(groundColor, skyColor, hemiT);
 
-    // simple hemisphere ambient + directional light
-    vec3 lightDir = normalize(vec3(1.0, 1.8, 0.8));
-    float diff = max(dot(vNormal, lightDir), 0.0) * 0.6 + 0.4;
-    gl_FragColor = vec4(col.rgb * diff, 1.0);
+    // directional diffuse (sun)
+    float diff = max(dot(vNormal, normalize(sunDir)), 0.0);
+
+    // soft self-shadow: darken north-facing terrain slightly
+    float selfShadow = clamp(dot(vNormal, vec3(0.0, 0.5, 0.3)) * 0.5 + 0.7, 0.3, 1.0);
+
+    // SSS-like sub-surface on grass (bright green tint in shallow sunlight)
+    float sss = (1.0 - wR) * (1.0 - wSnow) * smoothstep(0.0, 0.3, diff) * 0.12;
+    vec3 sssColor = vec3(0.2, 0.45, 0.05) * sss;
+
+    vec3 lit = col.rgb * (ambient + sunColor * diff * selfShadow) + sssColor;
+
+    // ── distance fog ──────────────────────────────────────────────────
+    float dist = length(vWorldPos) / 180.0;
+    float fog  = smoothstep(0.5, 1.0, dist);
+    vec3 fogColor = vec3(0.68, 0.78, 0.90);
+    lit = mix(lit, fogColor, fog * 0.55);
+
+    gl_FragColor = vec4(lit, 1.0);
   }
 `;
 
@@ -155,7 +208,6 @@ export default function Terrain({ onHeightmapReady }: TerrainProps) {
     "/assets/prototype/terrain/snow_diffuse.png",
   ]);
 
-  // make all textures repeat
   [tGrass, tDirt, tRock, tSand, tSnow].forEach((t) => {
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
   });
@@ -175,10 +227,9 @@ export default function Terrain({ onHeightmapReady }: TerrainProps) {
     geo.computeVertexNormals();
 
     return { geometry: geo, heightmap: hmap };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Report heightmap after render (not during)
   const reportedRef = useRef(false);
   useEffect(() => {
     if (!reportedRef.current) {
@@ -189,40 +240,41 @@ export default function Terrain({ onHeightmapReady }: TerrainProps) {
 
   const uniforms = useMemo(
     () => ({
-      tGrass: { value: tGrass },
-      tDirt:  { value: tDirt  },
-      tRock:  { value: tRock  },
-      tSand:  { value: tSand  },
-      tSnow:  { value: tSnow  },
-      maxHeight: { value: MAX_HEIGHT },
-      seaLevel:  { value: SEA_LEVEL  },
+      tGrass:      { value: tGrass },
+      tDirt:       { value: tDirt  },
+      tRock:       { value: tRock  },
+      tSand:       { value: tSand  },
+      tSnow:       { value: tSnow  },
+      maxHeight:   { value: MAX_HEIGHT },
+      seaLevel:    { value: SEA_LEVEL  },
+      sunDir:      { value: new THREE.Vector3(0.6, 0.9, 0.4).normalize() },
+      sunColor:    { value: new THREE.Color(1.0, 0.88, 0.68) },
+      skyColor:    { value: new THREE.Color(0.52, 0.68, 0.92) },
+      groundColor: { value: new THREE.Color(0.22, 0.18, 0.12) },
+      time:        { value: 0 },
+      shadowStrength: { value: 0.65 },
     }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [tGrass, tDirt, tRock, tSand, tSnow]
   );
 
-  // scroll water UV over time
   useFrame(({ clock }) => {
+    if (uniforms.time) uniforms.time.value = clock.elapsedTime;
     if (waterRef.current) {
       const mat = waterRef.current.material as THREE.ShaderMaterial;
-      if (mat.uniforms?.time) {
-        mat.uniforms.time.value = clock.elapsedTime;
-      }
+      if (mat.uniforms?.time) mat.uniforms.time.value = clock.elapsedTime;
     }
   });
 
-  const waterUniforms = useMemo(
-    () => ({
-      time:      { value: 0 },
-      deepColor: { value: new THREE.Color(0x0a3d6b) },
-      shallowColor: { value: new THREE.Color(0x1a7aad) },
-      foamColor: { value: new THREE.Color(0xaaddff) },
-    }),
-    []
-  );
+  const waterUniforms = useMemo(() => ({
+    time:         { value: 0 },
+    deepColor:    { value: new THREE.Color(0x07305a) },
+    shallowColor: { value: new THREE.Color(0x1566a0) },
+    foamColor:    { value: new THREE.Color(0xb8dcf0) },
+  }), []);
 
   return (
     <>
-      {/* Main terrain */}
       <mesh geometry={geometry} receiveShadow castShadow>
         <shaderMaterial
           vertexShader={vertexShader}
@@ -233,22 +285,15 @@ export default function Terrain({ onHeightmapReady }: TerrainProps) {
       </mesh>
 
       {/* Water plane */}
-      <mesh
-        ref={waterRef}
-        rotation={[-Math.PI / 2, 0, 0]}
-        position={[0, SEA_LEVEL + 0.15, 0]}
-        receiveShadow
-      >
+      <mesh ref={waterRef} rotation={[-Math.PI / 2, 0, 0]} position={[0, SEA_LEVEL + 0.2, 0]} receiveShadow>
         <planeGeometry args={[SIZE, SIZE, 1, 1]} />
         <shaderMaterial
           transparent
           uniforms={waterUniforms}
           vertexShader={/* glsl */ `
             varying vec2 vUv;
-            varying vec3 vWorldPos;
             void main() {
               vUv = uv;
-              vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
               gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
             }
           `}
@@ -258,20 +303,16 @@ export default function Terrain({ onHeightmapReady }: TerrainProps) {
             uniform vec3 shallowColor;
             uniform vec3 foamColor;
             varying vec2 vUv;
-            varying vec3 vWorldPos;
-
             float wave(vec2 uv, float t) {
-              return sin(uv.x * 8.0 + t * 1.2) * 0.5
-                   + sin(uv.y * 6.0 + t * 0.9) * 0.5;
+              return sin(uv.x * 9.0 + t * 1.4) * 0.5
+                   + sin(uv.y * 7.0 + t * 1.0) * 0.5;
             }
-
             void main() {
               float w = wave(vUv, time) * 0.5 + 0.5;
-              vec3 col = mix(deepColor, shallowColor, w * 0.6);
-              float foam = smoothstep(0.8, 1.0, w);
-              col = mix(col, foamColor, foam * 0.4);
-              float fresnel = 0.3 + 0.7 * pow(1.0 - abs(dot(vec3(0,1,0), normalize(vec3(0.2, 0.8, 0.3)))), 3.0);
-              gl_FragColor = vec4(col, 0.82 * fresnel + 0.18);
+              vec3 col = mix(deepColor, shallowColor, w * 0.65);
+              float foam = smoothstep(0.82, 1.0, w);
+              col = mix(col, foamColor, foam * 0.5);
+              gl_FragColor = vec4(col, 0.88);
             }
           `}
           side={THREE.FrontSide}
