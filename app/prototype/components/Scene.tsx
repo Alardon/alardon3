@@ -108,7 +108,7 @@ export default function Scene() {
   return (
     <div className="w-full h-full relative">
       <Canvas
-        shadows={{ type: THREE.PCFShadowMap }}
+        shadows={{ type: THREE.VSMShadowMap }}
         camera={{
           fov: 45,
           near: 0.5,
